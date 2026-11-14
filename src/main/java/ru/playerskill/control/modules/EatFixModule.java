@@ -1,11 +1,5 @@
 package ru.playerskill.control.modules;
 
-import net.minecraft.server.v1_12_R1.EntityLiving;
-import net.minecraft.server.v1_12_R1.Item;
-import net.minecraft.server.v1_12_R1.ItemFood;
-import net.minecraft.server.v1_12_R1.ItemPotion;
-import net.minecraft.server.v1_12_R1.ItemStack;
-import org.bukkit.craftbukkit.v1_12_R1.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -17,27 +11,44 @@ import ru.playerskill.control.ControlPlugin;
 import ru.playerskill.control.Module;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 /**
  * Фикс MC-849: клиент при ударе/клике по сущности сам отменяет использование
  * еды или зелья, а сервер нет — через 1,6 секунды предмет расходуется без
  * анимации. Мы синхронизируем сервер с уже свершившимся фактом клиента.
+ *
+ * NMS доступен через рефлексию, чтобы модуль собирался без полного spigot
+ * (BuildTools) — в том числе в CI. Сервер фиксированный (1.12.2, v1_12_R1),
+ * поэтому поиск классов по имени безопасен.
  */
 public class EatFixModule implements Module, Listener {
 
     private final ControlPlugin plugin;
     private final Field activeItemStackField;
+    private final Method getItemMethod;
+    private final Class<?> itemFoodClass;
+    private final Class<?> itemPotionClass;
     private final boolean blockOnAttack;
     private final boolean blockOnNpcClick;
     private boolean warned = false;
 
-    public EatFixModule(ControlPlugin plugin) throws NoSuchFieldException {
+    public EatFixModule(ControlPlugin plugin) throws Exception {
         this.plugin = plugin;
 
         // Поле одно на игрока — покрывает и основную руку, и вторую.
         // Проверка руки не нужна: сервер хранит только один активный предмет.
-        activeItemStackField = EntityLiving.class.getDeclaredField("activeItemStack");
+        Class<?> entityLiving = Class.forName("net.minecraft.server.v1_12_R1.EntityLiving");
+        activeItemStackField = entityLiving.getDeclaredField("activeItemStack");
         activeItemStackField.setAccessible(true);
+
+        // Классы еды и зелий — для проверки типа предмета.
+        itemFoodClass = Class.forName("net.minecraft.server.v1_12_R1.ItemFood");
+        itemPotionClass = Class.forName("net.minecraft.server.v1_12_R1.ItemPotion");
+
+        // NMS ItemStack.getItem() — вычисляем один раз в конструкторе.
+        Class<?> nmsItemStack = Class.forName("net.minecraft.server.v1_12_R1.ItemStack");
+        getItemMethod = nmsItemStack.getMethod("getItem");
 
         blockOnAttack = plugin.getConfig().getBoolean("eat-fix.block-on-attack", true);
         blockOnNpcClick = plugin.getConfig().getBoolean("eat-fix.block-on-npc-click", true);
@@ -83,22 +94,27 @@ public class EatFixModule implements Module, Listener {
     }
 
     private void clearActiveItem(Player player) {
-        EntityLiving handle = ((CraftPlayer) player).getHandle();
         try {
-            ItemStack active = (ItemStack) activeItemStackField.get(handle);
-            if (active != null && isConsumable(active.getItem())) {
+            Object handle = player.getClass().getMethod("getHandle").invoke(player);
+            Object active = activeItemStackField.get(handle);
+            if (active == null) {
+                return;
+            }
+
+            Object item = getItemMethod.invoke(active);
+            if (item != null && isConsumable(item)) {
                 activeItemStackField.set(handle, null);
             }
-        } catch (IllegalAccessException ex) {
+        } catch (Exception ex) {
             if (!warned) {
                 warned = true;
-                plugin.getLogger().warning("EatFix: потерян доступ к полю activeItemStack: " + ex.getMessage());
+                plugin.getLogger().warning("EatFix: потерян доступ к activeItemStack: " + ex.getMessage());
             }
         }
     }
 
     /** Молоко не фильтруем — осознанное решение. При необходимости добавить ItemBucketMilk сюда. */
-    private boolean isConsumable(Item item) {
-        return item instanceof ItemFood || item instanceof ItemPotion;
+    private boolean isConsumable(Object item) {
+        return itemFoodClass.isInstance(item) || itemPotionClass.isInstance(item);
     }
 }
