@@ -1,0 +1,13 @@
+name: SkyGame-Control
+main: ru.praydein.core.CorePlugin
+version: 1.0.0
+description: Универсальный модульный плагин для управления сервером Выживания SkyGame
+commands:
+  control:
+    description: Управление SkyGame-Control
+    usage: /control reload
+    aliases: [ctrl, sg, cont]
+permissions:
+  control.reload:
+    description: Доступ к перезагрузке плагина
+    default: op
