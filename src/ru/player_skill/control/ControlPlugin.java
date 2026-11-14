@@ -2,7 +2,7 @@ package ru.player_skill.control;
 
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
-import ru.praydein.control.modules.EatFixModule;
+import ru.player_skill.control.modules.EatFixModule;
 
 import java.util.ArrayList;
 import java.util.List;
