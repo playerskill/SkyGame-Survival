@@ -1,11 +1,11 @@
 name: SkyGame-Control
 version: 1.0.0
-main: ru.player_skill.skygamecontrol.SkyGameControlPlugin
+main: ru.player_skill.skygamecontrol.SkyGameControl
 author: PlayeR_SkiLL
-description: Модульный плагин для управления игровыми механиками SkyGame
+description: Модульный плагин для управления сервером
 commands:
   control:
-    description: Управление SkyGame-Control
+    description: Управление плагином SkyGame-Control
     usage: /control [reload]
     aliases: [cont, sg, ctrl]
 permissions:
