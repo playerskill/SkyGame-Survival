@@ -6,27 +6,49 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerAnimationEvent;
+import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import ru.playerskill.control.ControlPlugin;
 import ru.playerskill.control.Module;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 
 /**
- * Фикс MC-849: клиент при ударе/клике по сущности сам отменяет использование
- * еды или зелья, а сервер нет — через 1,6 секунды предмет расходуется без
- * анимации. Мы синхронизируем сервер с уже свершившимся фактом клиента.
+ * Фикс MC-849 и связанного с ним поведения клиента.
+ *
+ * Механизм 1 (сам баг): при ударе клиент отменяет еду, сервер нет —
+ * предмет расходуется без анимации. Ловим замах и сбрасываем активный предмет.
+ *
+ * Механизм 2 (НПС): при правом клике по сущности, которую «не приняла»
+ * игра (Citizens, Shopkeepers обрабатывают клик на своей стороне),
+ * клиент откатывается к использованию предмета в руке — еда начинается
+ * или продолжается ЗАНОВО уже после нашего сброса. Поэтому после клика
+ * по сущности открываем короткое окно и отменяем использование
+ * еды/зелья внутри него.
  *
  * Имена полей и методов NMS в Spigot обфусцированы, поэтому:
  *  - поле активного предмета ищем по типу (единственный нестатический,
  *    нефинальный ItemStack в EntityLiving), а не по имени;
  *  - тип предмета определяем через CraftItemStack.asBukkitCopy и Material:
  *    классы CraftBukkit не обфусцированы.
+ *
+ * ignoreCancelled на событиях сущности НЕ ставим: плагины НПС отменяют
+ * взаимодействие, но клиент уже отменил еду — сервер обязан синхронизироваться
+ * независимо от отмены события.
  */
 public class EatFixModule implements Module, Listener {
+
+    /** Окно, в течение которого после клика по сущности гасится использование предмета. */
+    private static final long ENTITY_CLICK_WINDOW_MS = 150L;
 
     private final ControlPlugin plugin;
     private final Field activeItemStackField;
@@ -34,6 +56,7 @@ public class EatFixModule implements Module, Listener {
     private final Method getHandleMethod;
     private final boolean blockOnAttack;
     private final boolean blockOnNpcClick;
+    private final Map<UUID, Long> entityClickMarks = new HashMap<UUID, Long>();
     private boolean warned = false;
 
     public EatFixModule(ControlPlugin plugin) throws Exception {
@@ -73,6 +96,7 @@ public class EatFixModule implements Module, Listener {
     @Override
     public void disable() {
         HandlerList.unregisterAll(this);
+        entityClickMarks.clear();
     }
 
     /**
@@ -105,7 +129,7 @@ public class EatFixModule implements Module, Listener {
      * Любой PlayerAnimationEvent в 1.12.2 — это замах. Фильтр по ARM_SWING
      * не ставим: он рискует пропустить замах второй рукой.
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onSwing(PlayerAnimationEvent event) {
         if (!blockOnAttack) {
             return;
@@ -114,15 +138,66 @@ public class EatFixModule implements Module, Listener {
     }
 
     /**
-     * Клик по любой сущности: НПС, мобы, игроки, стойки брони
-     * (InteractAtEntityEvent — наследник этого события и ловится им же).
+     * Клик по любой сущности: НПС, мобы, игроки, стойки брони.
+     * Сбрасываем текущую еду и открываем окно против «отката» клиента
+     * к использованию предмета.
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onEntityClick(PlayerInteractEntityEvent event) {
         if (!blockOnNpcClick) {
             return;
         }
+        markAndClear(event.getPlayer());
+    }
+
+    /**
+     * Вариант того же события с точкой попадания — у него свой список
+     * слушателей, родительский обработчик его НЕ ловит. Нужен для
+     * стоек брони и отдельных типов магазинов.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onEntityClickAt(PlayerInteractAtEntityEvent event) {
+        if (!blockOnNpcClick) {
+            return;
+        }
+        markAndClear(event.getPlayer());
+    }
+
+    /**
+     * Гасим «откат»: клиент после непринятого взаимодействия шлёт пакет
+     * использования предмета. Если он приходит в окно после клика по
+     * сущности и в руке еда/зелье — отменяем использование предмета.
+     * Обычное поедание (клик по воздуху без клика по сущности) не трогаем.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInteractAfterEntity(PlayerInteractEvent event) {
+        if (!blockOnNpcClick) {
+            return;
+        }
+        Action action = event.getAction();
+        if (action != Action.RIGHT_CLICK_AIR && action != Action.RIGHT_CLICK_BLOCK) {
+            return;
+        }
+        Long mark = entityClickMarks.get(event.getPlayer().getUniqueId());
+        if (mark == null || System.currentTimeMillis() - mark > ENTITY_CLICK_WINDOW_MS) {
+            return;
+        }
+        org.bukkit.inventory.ItemStack used = event.getItem();
+        if (used == null || !isConsumable(used.getType())) {
+            return;
+        }
+        event.setCancelled(true);
         clearActiveItem(event.getPlayer());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent event) {
+        entityClickMarks.remove(event.getPlayer().getUniqueId());
+    }
+
+    private void markAndClear(Player player) {
+        entityClickMarks.put(player.getUniqueId(), System.currentTimeMillis());
+        clearActiveItem(player);
     }
 
     private void clearActiveItem(Player player) {
