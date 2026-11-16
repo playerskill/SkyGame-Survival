@@ -8,7 +8,7 @@ commands:
   skydb:
     description: Управление SkyDbWatchdog
     usage: /skydb test
-    aliases: [atw]
+    aliases: [dbwatchdog]
 
 permissions:
   skydb.admin:
