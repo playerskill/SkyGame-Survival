@@ -54,6 +54,7 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
     private volatile State state = State.NORMAL;
     private volatile long outageStartedAt;
     private volatile long recoveryStartedAt;
+    private volatile boolean commandForcedOutage;
 
     private HikariDataSource dataSource;
     private ScheduledExecutorService checker;
@@ -71,18 +72,12 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
     private Object vaultEconomyProvider;
     private Object vaultEconomyProxy;
     private volatile boolean updatingVaultEconomy;
-    private String economyBlockedMessage;
+    private volatile String economyBlockedMessage;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        economyBlockedMessage = getConfig().getString("messages.economy-blocked",
-                "&cОперации с валютой временно недоступны: сбой базы данных.");
-        normalCheckSeconds = Math.max(1L, getConfig().getLong("checks.check-interval-seconds", 30L));
-        outageCheckSeconds = Math.max(1L, getConfig().getLong("checks.outage-check-interval-seconds", 10L));
-        kickAfterSeconds = Math.max(1L, getConfig().getLong("checks.kick-after-seconds", 300L));
-        // 0 — снимать вайтлист при первой же успешной проверке
-        recoveryConfirmSeconds = Math.max(0L, getConfig().getLong("checks.recovery-confirm-seconds", 120L));
+        readConfig();
         logsDirectory = getDataFolder().toPath().resolve("logs");
 
         getServer().getPluginManager().registerEvents(this, this);
@@ -95,7 +90,24 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
                     "Ne udalos sozdat pul soedineniy; proverki prodolzhatsya, no budut provalivatsya.", exception);
         }
 
-        checker = Executors.newSingleThreadScheduledExecutor(new java.util.concurrent.ThreadFactory() {
+        checker = createChecker();
+
+        getLogger().info("Monitoring bazy zapushchen; pervaya proverka cherez " + normalCheckSeconds + " sec.");
+        scheduleCheck(normalCheckSeconds);
+    }
+
+    private void readConfig() {
+        economyBlockedMessage = getConfig().getString("messages.economy-blocked",
+                "&cОперации с валютой временно недоступны: сбой базы данных.");
+        normalCheckSeconds = Math.max(1L, getConfig().getLong("checks.check-interval-seconds", 30L));
+        outageCheckSeconds = Math.max(1L, getConfig().getLong("checks.outage-check-interval-seconds", 10L));
+        kickAfterSeconds = Math.max(1L, getConfig().getLong("checks.kick-after-seconds", 300L));
+        // 0 — снимать вайтлист при первой же успешной проверке
+        recoveryConfirmSeconds = Math.max(0L, getConfig().getLong("checks.recovery-confirm-seconds", 120L));
+    }
+
+    private ScheduledExecutorService createChecker() {
+        return Executors.newSingleThreadScheduledExecutor(new java.util.concurrent.ThreadFactory() {
             @Override
             public Thread newThread(Runnable runnable) {
                 Thread thread = new Thread(runnable, "SkyDbWatchdog-Database-Check");
@@ -103,9 +115,6 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
                 return thread;
             }
         });
-
-        getLogger().info("Monitoring bazy zapushchen; pervaya proverka cherez " + normalCheckSeconds + " sec.");
-        scheduleCheck(normalCheckSeconds);
     }
 
     @Override
@@ -125,12 +134,67 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
             sender.sendMessage(ChatColor.RED + "У вас нет права skydb.admin.");
             return true;
         }
-        if (args.length == 1 && "test".equalsIgnoreCase(args[0])) {
+
+        if (args.length == 0) {
+            sendPluginInfo(sender);
+            return true;
+        }
+
+        String sub = args[0].toLowerCase();
+        if ("test".equals(sub)) {
             testDatabase(sender);
             return true;
         }
-        sender.sendMessage(ChatColor.YELLOW + "Использование: /skydb test");
+        if ("reload".equals(sub)) {
+            reloadPlugin(sender);
+            return true;
+        }
+        if ("test-outage".equals(sub)) {
+            toggleForcedOutage(sender);
+            return true;
+        }
+
+        sender.sendMessage(ChatColor.YELLOW + "Использование: /skydb [test|reload|test-outage]");
         return true;
+    }
+
+    private void sendPluginInfo(CommandSender sender) {
+        String stateName;
+        switch (state) {
+            case NORMAL:
+                stateName = "норма";
+                break;
+            case OUTAGE:
+                stateName = "сбой БД (ожидание кика)";
+                break;
+            case LOCKED:
+                stateName = "кик выполнен, вайтлист включён";
+                break;
+            default:
+                stateName = state.name();
+        }
+        sender.sendMessage(ChatColor.GOLD + "==== SkyDbWatchdog ====");
+        sender.sendMessage(ChatColor.YELLOW + "Версия: " + ChatColor.WHITE + getDescription().getVersion()
+                + ChatColor.YELLOW + ", автор: " + ChatColor.WHITE + getDescription().getAuthors());
+        sender.sendMessage(ChatColor.YELLOW + "Состояние: " + ChatColor.WHITE + stateName);
+        if (commandForcedOutage) {
+            sender.sendMessage(ChatColor.RED + "Активен тестовый режим сбоя (test-outage).");
+        }
+        sender.sendMessage(ChatColor.YELLOW + "База: " + ChatColor.WHITE
+                + getConfig().getString("database.type", "mysql") + " "
+                + getConfig().getString("database.address", "?")
+                + "/" + getConfig().getString("database.name", "?"));
+        sender.sendMessage(ChatColor.YELLOW + "Пул соединений: " + ChatColor.WHITE
+                + (dataSource != null && !dataSource.isClosed() ? "работает" : "не создан"));
+        sender.sendMessage(ChatColor.YELLOW + "Защита экономики: " + ChatColor.WHITE
+                + (vaultEconomyProxy != null ? "активна" : "выключена"));
+        sender.sendMessage(ChatColor.YELLOW + "Интервалы (сек): фоновая проверка "
+                + ChatColor.WHITE + normalCheckSeconds
+                + ChatColor.YELLOW + ", при сбое " + ChatColor.WHITE + outageCheckSeconds
+                + ChatColor.YELLOW + ", до кика " + ChatColor.WHITE + kickAfterSeconds
+                + ChatColor.YELLOW + ", подтверждение восстановления " + ChatColor.WHITE + recoveryConfirmSeconds);
+        sender.sendMessage(ChatColor.YELLOW + "Подкоманды: " + ChatColor.WHITE
+                + "/skydb test, /skydb reload, /skydb test-outage");
     }
 
     private void testDatabase(final CommandSender sender) {
@@ -156,6 +220,57 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
                 });
             }
         });
+    }
+
+    private void reloadPlugin(CommandSender sender) {
+        // Останавливаем старый планировщик и пул, перечитываем конфиг, поднимаем заново.
+        if (checker != null) {
+            checker.shutdownNow();
+        }
+        if (dataSource != null) {
+            dataSource.close();
+            dataSource = null;
+        }
+
+        reloadConfig();
+        readConfig();
+
+        try {
+            dataSource = createDataSource();
+        } catch (RuntimeException exception) {
+            getLogger().log(Level.SEVERE,
+                    "Ne udalos sozdat pul soedineniy posle reload; proverki budut provalivatsya.", exception);
+        }
+
+        checker = createChecker();
+        getLogger().info("Konfig perezagruzhen; monitoring zapushchen zanovo.");
+        sender.sendMessage(ChatColor.GREEN + "Конфиг перезагружен. Новые интервалы: фоновая проверка "
+                + normalCheckSeconds + " сек., при сбое " + outageCheckSeconds + " сек., до кика "
+                + kickAfterSeconds + " сек., подтверждение восстановления " + recoveryConfirmSeconds + " сек.");
+        // Состояние не сбрасываем: если шёл сбой — он продолжается с новыми настройками.
+        scheduleCheck(normalCheckSeconds);
+    }
+
+    private void toggleForcedOutage(CommandSender sender) {
+        if (!commandForcedOutage) {
+            commandForcedOutage = true;
+            sender.sendMessage(ChatColor.YELLOW + "Тестовый режим сбоя включён: плагин ведёт себя так, будто база недоступна.");
+            sender.sendMessage(ChatColor.YELLOW + "Если в течение " + kickAfterSeconds
+                    + " сек. не выключить — будет выполнен кик и включён вайтлист (как при реальном сбое).");
+            // Если сейчас состояние нормальное — сразу переходим в режим сбоя.
+            if (state == State.NORMAL) {
+                beginOutage();
+            }
+            scheduleCheck(outageCheckSeconds);
+            return;
+        }
+        // Выключаем: возвращаем сервер в норму, если он был не в ней.
+        commandForcedOutage = false;
+        sender.sendMessage(ChatColor.GREEN + "Тестовый режим сбоя выключен.");
+        if (state != State.NORMAL) {
+            recoverFromOutage();
+        }
+        scheduleCheck(normalCheckSeconds);
     }
 
     // ---------- База данных ----------
@@ -249,11 +364,16 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
     private void handleCheckResult(boolean connected, SQLException failure) {
         if (!isEnabled()) return;
 
+        // Тестовый режим: реальный результат проверки игнорируется, база считается недоступной.
+        if (commandForcedOutage) {
+            connected = false;
+        }
+
         if (state == State.NORMAL) {
             if (connected) {
                 scheduleCheck(normalCheckSeconds);
             } else {
-                getLogger().warning("Baza dannyh nedostupna: " + failure.getMessage());
+                getLogger().warning("Baza dannyh nedostupna: " + (failure == null ? "(test mode)" : failure.getMessage()));
                 beginOutage();
                 scheduleCheck(outageCheckSeconds);
             }
