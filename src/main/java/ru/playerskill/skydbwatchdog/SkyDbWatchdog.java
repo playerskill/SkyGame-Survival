@@ -373,7 +373,8 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
             if (connected) {
                 scheduleCheck(normalCheckSeconds);
             } else {
-                getLogger().warning("Baza dannyh nedostupna: " + (failure == null ? "(test mode)" : failure.getMessage()));
+                getLogger().warning("Baza dannyh nedostupna: "
+                        + (failure == null ? "(test mode)" : failure.getMessage()));
                 beginOutage();
                 scheduleCheck(outageCheckSeconds);
             }
@@ -432,7 +433,7 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
 
         String reason = getConfig().getString("messages.kick",
                 "&cОшибка базы данных, срочно сообщите об этом в группе тг - t.me/skygame001");
-        String formattedReason = ChatColor.translateAlternateColorCodes('&', reason);
+        String formattedReason = colorize(reason);
         // Кикаем всех, кроме тех, кому выдали bypass-вайтлист: они остаются чинить базу.
         for (Player player : new ArrayList<Player>(Bukkit.getOnlinePlayers())) {
             if (player.isWhitelisted()) {
@@ -459,10 +460,18 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
         getLogger().info("Baza dannyh vosstanovlena; prezhnee sostoyanie whitelist vozvrashcheno.");
     }
 
+    private String colorize(String raw) {
+        return ChatColor.translateAlternateColorCodes('&', raw);
+    }
+
     private void broadcast(String key, String fallback) {
         String prefix = getConfig().getString("messages.prefix", "");
         String text = prefix + getConfig().getString("messages." + key, fallback);
-        Bukkit.broadcastMessage(ChatColor.translateAlternateColorCodes('&', text));
+        for (String line : colorize(text).split("\n")) {
+            if (!line.trim().isEmpty()) {
+                Bukkit.broadcastMessage(line);
+            }
+        }
     }
 
     private void logOutagePlayers() {
@@ -673,9 +682,8 @@ public final class SkyDbWatchdog extends JavaPlugin implements Listener {
         }
         if (!event.getPlayer().isWhitelisted()) {
             event.disallow(PlayerLoginEvent.Result.KICK_WHITELIST,
-                    ChatColor.translateAlternateColorCodes('&',
-                            getConfig().getString("messages.join-blocked",
-                                    "&cСервер временно закрыт: сбой базы данных. Попробуйте позже.")));
+                    colorize(getConfig().getString("messages.join-blocked",
+                            "&cСервер временно закрыт: сбой базы данных. Попробуйте позже.")));
         }
     }
 }
