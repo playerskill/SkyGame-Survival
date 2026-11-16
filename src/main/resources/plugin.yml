@@ -1,0 +1,16 @@
+name: SkyDbWatchdog
+main: ru.playerskill.skydbwatchdog.SkyDbWatchdog
+version: 1.0.0
+author: PlayeR_SkiLL
+description: Плагин для выбрасывания игроков с сервера в рамках предотвращения сбоев экономики
+
+commands:
+  skydb:
+    description: Управление SkyDbWatchdog
+    usage: /skydb test
+    aliases: [atw]
+
+permissions:
+  skydb.admin:
+    description: Доступ к командам SkyDbWatchdog
+    default: op
