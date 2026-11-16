@@ -5,7 +5,7 @@
 
     <modelVersion>4.0.0</modelVersion>
     <groupId>ru.playerskill</groupId>
-    <artifactId>Control</artifactId>
+    <artifactId>SkyDBWatchdog</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
